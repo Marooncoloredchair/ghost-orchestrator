@@ -1,8 +1,10 @@
-import "dotenv/config";
 import express from "express";
 import { z } from "zod";
 import { GHOST_NAME, GHOST_VERSION, runGhost } from "./ghost";
 import type { TargetAction } from "./types";
+import { loadEnvFiles } from "./env";
+
+const envResult = loadEnvFiles();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -30,6 +32,9 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: GHOST_NAME,
     version: GHOST_VERSION,
+    env: {
+      loadedFiles: envResult.loadedFiles,
+    },
     openClaw: {
       mode,
       urlConfigured: Boolean(process.env.OPENCLAW_PROPOSE_URL),
@@ -60,6 +65,48 @@ app.post("/v1/ghost/run", async (req, res) => {
     return res.status(500).json({
       error: message,
       ghost: { name: GHOST_NAME, version: GHOST_VERSION },
+    });
+  }
+});
+
+app.post("/v1/ghost/simulate", async (req, res) => {
+  const parsed = requestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid request",
+      details: parsed.error.flatten(),
+    });
+  }
+
+  try {
+    const body = parsed.data;
+    const providedAction = body.proposedAction as TargetAction | undefined;
+    const result = await runGhost(body.goal, providedAction);
+
+    const wouldExecute = result.verdict === "APPROVE";
+    const simulatedExecution = wouldExecute
+      ? {
+          status: "would_execute",
+          note: "Simulation only. No real side effects were performed.",
+        }
+      : {
+          status: "stopped_by_ghost",
+          note: "Simulation stopped due to non-APPROVE verdict.",
+        };
+
+    return res.json({
+      ghost: { name: GHOST_NAME, version: GHOST_VERSION },
+      mode: "simulation",
+      wouldExecute,
+      simulatedExecution,
+      ...result,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return res.status(500).json({
+      error: message,
+      ghost: { name: GHOST_NAME, version: GHOST_VERSION },
+      mode: "simulation",
     });
   }
 });

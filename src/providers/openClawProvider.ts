@@ -18,6 +18,10 @@ type OpenClawProviderResult = {
   source: "openclaw" | "fallback";
 };
 
+function quoteForPowerShellSingle(arg: string): string {
+  return `'${arg.replace(/'/g, "''")}'`;
+}
+
 function fallbackAction(goal: string): TargetAction {
   const g = goal.toLowerCase();
   if (/invoice|pay|stripe|wire|vendor/i.test(g)) {
@@ -126,6 +130,17 @@ function toProposalFromAgentText(text: string, goal: string): OpenClawProviderRe
   return parseCandidate(parsed, goal);
 }
 
+function extractPayloadTextField(raw: string): string | null {
+  // Handles noisy logs where OpenClaw prints JSON envelopes with escaped text payloads.
+  const m = raw.match(/"text"\s*:\s*"((?:\\.|[^"\\])*)"/s);
+  if (!m || !m[1]) return null;
+  try {
+    return JSON.parse(`"${m[1]}"`) as string;
+  } catch {
+    return null;
+  }
+}
+
 async function proposeViaOpenClawCli(goal: string): Promise<OpenClawProviderResult | null> {
   const cmd = (process.env.OPENCLAW_CMD ?? "openclaw").trim() || "openclaw";
   const sessionId = (process.env.OPENCLAW_SESSION_ID ?? "ghost-orchestrator").trim();
@@ -137,10 +152,10 @@ async function proposeViaOpenClawCli(goal: string): Promise<OpenClawProviderResu
 
   const modelPrompt = [
     "You are proposing a single next tool call.",
-    "Return ONLY one JSON object (no markdown, no extra text):",
-    '{"tool":"string","endpoint":"string optional","intent":"string","payload":{}}',
+    "Return only one JSON object with keys tool, endpoint, intent, payload.",
+    "No markdown and no extra prose.",
     `Goal: ${goal}`,
-  ].join("\n");
+  ].join(" ");
 
   const args = [
     ...(profile ? ["--profile", profile] : []),
@@ -154,23 +169,74 @@ async function proposeViaOpenClawCli(goal: string): Promise<OpenClawProviderResu
   ];
 
   const childEnv = { ...process.env, FORCE_COLOR: "0" };
-  const { stdout, stderr } = await execFileAsync(cmd, args, {
-    windowsHide: true,
-    timeout: timeoutMs,
-    maxBuffer: 1024 * 1024 * 4,
-    env: childEnv,
-  });
+  let stdout = "";
+  let stderr = "";
+  try {
+    const shouldUseCmdShim =
+      process.platform === "win32" && /\.cmd$/i.test(cmd);
 
-  const envelope = extractLastJsonObject(stdout) as
+    const execResult = shouldUseCmdShim
+      ? await execFileAsync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            `& ${quoteForPowerShellSingle(cmd)} @(${args.map((a) => quoteForPowerShellSingle(a)).join(", ")})`,
+          ],
+          {
+            windowsHide: true,
+            timeout: timeoutMs,
+            maxBuffer: 1024 * 1024 * 4,
+            env: childEnv,
+          },
+        )
+      : await execFileAsync(cmd, args, {
+          windowsHide: true,
+          timeout: timeoutMs,
+          maxBuffer: 1024 * 1024 * 4,
+          env: childEnv,
+        });
+    stdout = execResult.stdout;
+    stderr = execResult.stderr;
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && (err as { code?: unknown }).code === "ENOENT") {
+      throw new Error(
+        `OpenClaw CLI not found (cmd: "${cmd}"). Install openclaw or set OPENCLAW_CMD to the full executable path.`,
+      );
+    }
+
+    const details = err instanceof Error ? err.message : String(err);
+    throw new Error(`OpenClaw CLI execution failed: ${details}`);
+  }
+
+  const combined = [stdout, stderr].filter(Boolean).join("\n");
+  const envelopeFromStdout = extractLastJsonObject(stdout) as
     | { payloads?: Array<{ text?: string }> }
     | null;
-  const payloadText = envelope?.payloads?.find((p) => typeof p.text === "string")?.text?.trim();
+  const envelopeFromStderr = extractLastJsonObject(stderr) as
+    | { payloads?: Array<{ text?: string }> }
+    | null;
+  const envelopeFromCombined = extractLastJsonObject(combined) as
+    | { payloads?: Array<{ text?: string }> }
+    | null;
+  const envelope = envelopeFromStdout ?? envelopeFromStderr ?? envelopeFromCombined;
+  const payloadText =
+    envelope?.payloads?.find((p) => typeof p.text === "string")?.text?.trim() ??
+    extractPayloadTextField(combined)?.trim() ??
+    null;
 
   if (!payloadText) {
     const fallbackFromStdout = toProposalFromAgentText(stdout, goal);
     if (fallbackFromStdout) return fallbackFromStdout;
+    const fallbackFromStderr = toProposalFromAgentText(stderr, goal);
+    if (fallbackFromStderr) return fallbackFromStderr;
+    const fallbackFromCombined = toProposalFromAgentText(combined, goal);
+    if (fallbackFromCombined) return fallbackFromCombined;
     throw new Error(
-      `OpenClaw CLI returned no text payload. stderr=${stderr?.slice(0, 400) ?? ""}`,
+      `OpenClaw CLI returned no text payload. stdout=${stdout?.slice(0, 240) ?? ""} stderr=${stderr?.slice(0, 240) ?? ""}`,
     );
   }
 
@@ -235,15 +301,23 @@ export async function proposeWithOpenClaw(goal: string): Promise<OpenClawProvide
     }
 
     // auto: try URL first (if configured), then CLI.
-    const urlProposal = await proposeViaUrl(trimmed).catch(() => null);
+    let urlError = "";
+    const urlProposal = await proposeViaUrl(trimmed).catch((err) => {
+      urlError = err instanceof Error ? err.message : String(err);
+      return null;
+    });
     if (urlProposal) return urlProposal;
 
-    const cliProposal = await proposeViaOpenClawCli(trimmed).catch(() => null);
+    let cliError = "";
+    const cliProposal = await proposeViaOpenClawCli(trimmed).catch((err) => {
+      cliError = err instanceof Error ? err.message : String(err);
+      return null;
+    });
     if (cliProposal) return cliProposal;
 
     return {
       targetAction: fallbackAction(trimmed),
-      rawModel: "openclaw unavailable in auto mode; using fallback",
+      rawModel: `openclaw unavailable in auto mode; using fallback (url: ${urlError || "not configured"}; cli: ${cliError || "not attempted"})`,
       source: "fallback",
     };
   } catch (err) {

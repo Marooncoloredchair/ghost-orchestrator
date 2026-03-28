@@ -31,6 +31,8 @@ npm install
 cp .env.example .env
 ```
 
+Ghost also supports `.env.local` (overrides `.env`).
+
 3. Run in development
 
 ```bash
@@ -63,6 +65,7 @@ When running in CLI mode, Ghost asks OpenClaw to produce one strict JSON action 
 ### `GET /health`
 
 Basic service health and config status.
+Includes which env files were loaded and OpenClaw mode/config snapshot.
 
 ### `POST /v1/ghost/run`
 
