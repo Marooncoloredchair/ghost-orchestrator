@@ -4,6 +4,22 @@
   "private": false,
   "description": "Standalone orchestration gate for OpenClaw-style agent actions",
   "license": "CC0-1.0",
+  "homepage": "https://github.com/Marooncoloredchair/ghost-orchestrator#readme",
+  "bugs": {
+    "url": "https://github.com/Marooncoloredchair/ghost-orchestrator/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Marooncoloredchair/ghost-orchestrator.git"
+  },
+  "keywords": [
+    "ghost-orchestrator",
+    "openclaw",
+    "safety",
+    "agent",
+    "governance",
+    "orchestration"
+  ],
   "main": "dist/server.js",
   "files": [
     "dist",
