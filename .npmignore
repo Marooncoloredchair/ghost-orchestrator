@@ -1,0 +1,7 @@
+# Always exclude secrets and local overrides from the published tarball.
+# npm uses .npmignore when present; without it, it falls back to .gitignore
+# (behavior can differ by version — explicit rules are safer).
+.env
+.env.local
+.env.*.local
+*.pem
